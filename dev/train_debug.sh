@@ -29,6 +29,20 @@ TINY_RUN=${TINY_RUN:-"0"}
 SEED=${SEED:-42}
 NUM_GPUS=${NUM_GPUS:-8}
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-"False"}
+USE_ADAPTER=${USE_ADAPTER:-"False"}
+ADAPTER_TYPE=${ADAPTER_TYPE:-"lora"}
+TARGET_MODULES=${TARGET_MODULES:-"q_proj,v_proj"}
+ADAPTER_BIAS=${ADAPTER_BIAS:-"none"}
+LORA_R=${LORA_R:-8}
+LORA_ALPHA=${LORA_ALPHA:-16}
+LORA_DROPOUT=${LORA_DROPOUT:-0.05}
+OFT_BLOCK_SIZE=${OFT_BLOCK_SIZE:-32}
+OFT_R=${OFT_R:-0}
+OFT_MODULE_DROPOUT=${OFT_MODULE_DROPOUT:-0.0}
+USE_CAYLEY_NEUMANN=${USE_CAYLEY_NEUMANN:-"True"}
+USE_OFT_REGULARIZER=${USE_OFT_REGULARIZER:-"False"}
+LAMBDA_OFT=${LAMBDA_OFT:-0.0}
+OFT_REGULARIZER_TYPE=${OFT_REGULARIZER_TYPE:-identity}
 
 DS_CONFIG_BF16=${DS_CONFIG_BF16:-"$REPO_DIR/experiment/med_asft_debug/config/ds_zero2_bf16.json"}
 DS_CONFIG_FP16=${DS_CONFIG_FP16:-"$REPO_DIR/experiment/med_asft_debug/config/ds_zero2_fp16.json"}
@@ -67,7 +81,21 @@ COMMON_ARGS=(
   --model_name_or_path "$MODEL_PATH"
   --data_path "$DATA_PATH"
   --output_dir "$OUTPUT_DIR"
+  --use_adapter "$USE_ADAPTER"
+  --adapter_type "$ADAPTER_TYPE"
+  --target_modules "$TARGET_MODULES"
+  --adapter_bias "$ADAPTER_BIAS"
   --use_lora False
+  --lora_r "$LORA_R"
+  --lora_alpha "$LORA_ALPHA"
+  --lora_dropout "$LORA_DROPOUT"
+  --oft_block_size "$OFT_BLOCK_SIZE"
+  --oft_r "$OFT_R"
+  --oft_module_dropout "$OFT_MODULE_DROPOUT"
+  --use_cayley_neumann "$USE_CAYLEY_NEUMANN"
+  --use_oft_regularizer "$USE_OFT_REGULARIZER"
+  --lambda_oft "$LAMBDA_OFT"
+  --oft_regularizer_type "$OFT_REGULARIZER_TYPE"
   --precision "$PRECISION"
   --seed "$SEED"
   --max_steps "$MAX_STEPS"

@@ -1,0 +1,16 @@
+{
+  "/root/autodl-tmp/models/qwen2.5-7b-asft-med-bs4-merged": {
+    "medqa": {
+      "accuracy": 0.6229379418695994,
+      "total_samples": 1273
+    },
+    "mmlu": {
+      "accuracy": 0.7813070463672873,
+      "total_samples": 2739
+    },
+    "medmcqa": {
+      "accuracy": 0.5727946449916328,
+      "total_samples": 4183
+    }
+  }
+}

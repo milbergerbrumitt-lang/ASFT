@@ -1,0 +1,24 @@
+{
+    "aime24": {
+        "acc": 10.0,
+        "mean_acc": 10.0,
+        "all_acc": [
+            10.0
+        ],
+        "num_samples": 30
+    },
+    "avg": {
+        "acc": 10.0,
+        "mean_acc": null,
+        "all_acc": null,
+        "num_samples": null
+    },
+    "overall": {
+        "acc": 10.0,
+        "mean_acc": 10.0,
+        "all_acc": [
+            10.0
+        ],
+        "num_samples": 30
+    }
+}

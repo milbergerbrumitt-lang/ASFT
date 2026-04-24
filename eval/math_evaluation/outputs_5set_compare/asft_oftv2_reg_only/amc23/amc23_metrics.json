@@ -1,0 +1,13 @@
+{
+    "num_samples": 40,
+    "num_scores": 40,
+    "timeout_samples": 0,
+    "empty_samples": 0,
+    "acc": 45.0,
+    "all_acc": [
+        45.0
+    ],
+    "mean_acc": 45.0,
+    "time_use_in_second": 26.958284378051758,
+    "time_use_in_minute": "0:26"
+}

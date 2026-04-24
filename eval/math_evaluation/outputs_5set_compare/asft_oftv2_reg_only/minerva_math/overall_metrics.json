@@ -1,0 +1,24 @@
+{
+    "minerva_math": {
+        "acc": 30.5,
+        "mean_acc": 30.5,
+        "all_acc": [
+            30.5
+        ],
+        "num_samples": 272
+    },
+    "avg": {
+        "acc": 30.5,
+        "mean_acc": null,
+        "all_acc": null,
+        "num_samples": null
+    },
+    "overall": {
+        "acc": 30.5,
+        "mean_acc": 30.5,
+        "all_acc": [
+            30.5
+        ],
+        "num_samples": 272
+    }
+}

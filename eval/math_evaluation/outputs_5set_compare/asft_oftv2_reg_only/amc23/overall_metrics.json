@@ -1,0 +1,24 @@
+{
+    "amc23": {
+        "acc": 45.0,
+        "mean_acc": 45.0,
+        "all_acc": [
+            45.0
+        ],
+        "num_samples": 40
+    },
+    "avg": {
+        "acc": 45.0,
+        "mean_acc": null,
+        "all_acc": null,
+        "num_samples": null
+    },
+    "overall": {
+        "acc": 45.0,
+        "mean_acc": 45.0,
+        "all_acc": [
+            45.0
+        ],
+        "num_samples": 40
+    }
+}

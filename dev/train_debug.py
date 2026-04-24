@@ -3,6 +3,7 @@ import copy
 import logging
 import json
 import random
+import re
 import numpy as np
 import fire
 from dataclasses import dataclass, field
@@ -12,13 +13,14 @@ import torch.nn.functional as F
 import transformers
 from torch.utils.data import Dataset
 from transformers import Trainer, set_seed
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, OFTConfig, get_peft_model, TaskType
 os.environ["WANDB_MODE"] = "offline"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
 
 IGNORE_INDEX = -100
+SUPPORTED_ADAPTER_TYPES = {"lora", "oft", "oftv2"}
 
 
 def set_random_seed(seed: int) -> None:
@@ -71,7 +73,21 @@ class TrainingArguments(transformers.TrainingArguments):
     learning_rate: float = field(default=2e-5)
 
 class EnhancedTrainer(Trainer):
-    def __init__(self, mode="sft", kl_weight=0.1, clip_min=0.1, clip_max=2.0, alpha=0.1, original_model=None, *args, **kwargs):
+    def __init__(
+        self,
+        mode="sft",
+        kl_weight=0.1,
+        clip_min=0.1,
+        clip_max=2.0,
+        alpha=0.1,
+        original_model=None,
+        use_oft_regularizer=False,
+        lambda_oft=0.0,
+        oft_regularizer_type="identity",
+        adapter_type=None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.mode = mode
         self.kl_weight = kl_weight
@@ -79,6 +95,10 @@ class EnhancedTrainer(Trainer):
         self.clip_max = clip_max
         self.alpha = alpha
         self.original_model = original_model
+        self.use_oft_regularizer = use_oft_regularizer
+        self.lambda_oft = lambda_oft
+        self.oft_regularizer_type = oft_regularizer_type
+        self.adapter_type = adapter_type
         if original_model is not None:
             self.original_model.eval()
         print(f"Training mode: {mode}, alpha: {alpha}")
@@ -160,37 +180,234 @@ class EnhancedTrainer(Trainer):
                     valid_labels = torch.clamp(shift_labels, min=0, max=probs.size(-1)-1)
                     weights = probs.gather(1, valid_labels.unsqueeze(-1)).squeeze(-1).detach()
                     dft_losses = token_losses * weights
-                    # if self.original_model is not None:
-                    #     with torch.no_grad():
-                    #         orig_outputs = self.original_model(**inputs)
-                    #         orig_logits = orig_outputs.get("logits")[..., :-1, :].contiguous()
-                    #         orig_logits = orig_logits.view(-1, orig_logits.size(-1))[:shift_logits.size(0)]
-                    #     if orig_logits.size(0) == shift_logits.size(0):
-                    #         kl_div = F.kl_div(F.log_softmax(shift_logits, dim=-1), F.softmax(orig_logits, dim=-1), reduction='none').sum(dim=-1)
-                    #         weighted_losses = dft_losses + self.kl_weight * kl_div
-                    #     else:
-                    #         weighted_losses = dft_losses
-                    # else:
-                    with torch.no_grad():
-                        ref_logits = self.get_reference_logits(model, inputs)
-                        ref_logits = ref_logits[..., :-1, :].contiguous()
-                        ref_logits = ref_logits.view(-1, ref_logits.size(-1))[:shift_logits.size(0)]
+                    if self.use_oft_regularizer:
+                        if self.oft_regularizer_type != "identity":
+                            raise ValueError(
+                                f"Unsupported oft_regularizer_type={self.oft_regularizer_type!r}. "
+                                "Only 'identity' is currently supported."
+                            )
+                        if self.adapter_type != "oftv2":
+                            raise ValueError(
+                                "use_oft_regularizer=True requires adapter_type='oftv2'. "
+                                f"Received adapter_type={self.adapter_type!r}."
+                            )
+                        dft_loss = dft_losses[valid_mask].sum() / valid_mask.sum()
+                        loss = dft_loss + self.lambda_oft * oft_identity_regularization(model)
+                    else:
+                        with torch.no_grad():
+                            ref_logits = self.get_reference_logits(model, inputs)
+                            ref_logits = ref_logits[..., :-1, :].contiguous()
+                            ref_logits = ref_logits.view(-1, ref_logits.size(-1))[:shift_logits.size(0)]
 
-                    kl_div = F.kl_div(
-                        F.log_softmax(shift_logits, dim=-1),
-                        F.softmax(ref_logits, dim=-1),
-                        reduction="none",
-                    ).sum(dim=-1)
+                        kl_div = F.kl_div(
+                            F.log_softmax(shift_logits, dim=-1),
+                            F.softmax(ref_logits, dim=-1),
+                            reduction="none",
+                        ).sum(dim=-1)
 
-                    weighted_losses = dft_losses + self.kl_weight * kl_div
+                        weighted_losses = dft_losses + self.kl_weight * kl_div
 
-
-                loss = (weighted_losses[valid_mask].sum() / valid_mask.sum())
+                if not (self.mode == "asft" and self.use_oft_regularizer):
+                    loss = (weighted_losses[valid_mask].sum() / valid_mask.sum())
 
         else:
             loss = outputs.loss
         
         return (loss, outputs) if return_outputs else loss
+
+
+def parse_target_modules(target_modules):
+    if target_modules is None:
+        return ["q_proj", "v_proj"]
+
+    if isinstance(target_modules, str):
+        target_modules = target_modules.strip()
+        if not target_modules:
+            return ["q_proj", "v_proj"]
+        if target_modules.lower() == "all-linear":
+            return "all-linear"
+        if "," in target_modules:
+            parsed_modules = [module.strip() for module in target_modules.split(",") if module.strip()]
+            if not parsed_modules:
+                raise ValueError("target_modules is empty after parsing the comma-separated string.")
+            return parsed_modules
+
+    return target_modules
+
+
+def match_target_module(name: str, target_modules) -> bool:
+    if target_modules == "all-linear":
+        return True
+
+    if isinstance(target_modules, str):
+        return re.search(target_modules, name) is not None
+
+    return any(name == module_name or name.endswith(f".{module_name}") or name.endswith(module_name) for module_name in target_modules)
+
+
+def collect_target_linear_modules(model, target_modules):
+    matched_modules = []
+    for module_name, module in model.named_modules():
+        if module_name == "":
+            continue
+
+        if target_modules == "all-linear":
+            if isinstance(module, torch.nn.Linear) and not module_name.endswith("lm_head"):
+                matched_modules.append((module_name, module))
+            continue
+
+        if match_target_module(module_name, target_modules):
+            matched_modules.append((module_name, module))
+
+    return matched_modules
+
+
+def validate_oftv2_target_modules(model, target_modules, oft_block_size: int, oft_r: int):
+    if oft_block_size < 0:
+        raise ValueError(f"oft_block_size must be >= 0, got {oft_block_size}.")
+    if oft_r < 0:
+        raise ValueError(f"oft_r must be >= 0, got {oft_r}.")
+    if (oft_block_size == 0) == (oft_r == 0):
+        raise ValueError(
+            "OFTv2 requires exactly one of oft_block_size or oft_r to be set. "
+            f"Received oft_block_size={oft_block_size}, oft_r={oft_r}."
+        )
+
+    matched_modules = collect_target_linear_modules(model, target_modules)
+    if not matched_modules:
+        raise ValueError(f"No target modules matched for OFTv2 target_modules={target_modules!r}.")
+
+    for module_name, module in matched_modules:
+        if not hasattr(module, "in_features"):
+            raise ValueError(
+                f"OFTv2 target module '{module_name}' does not expose in_features; "
+                "only Linear-like modules with in_features are currently supported by this integration."
+            )
+
+        in_features = module.in_features
+        if oft_block_size > 0 and in_features % oft_block_size != 0:
+            raise ValueError(
+                f"OFTv2 target module '{module_name}' has in_features={in_features}, which is incompatible with "
+                f"oft_block_size={oft_block_size}. Expected in_features % oft_block_size == 0 so that "
+                f"r = in_features / oft_block_size is an integer."
+            )
+
+        if oft_r > 0 and in_features % oft_r != 0:
+            raise ValueError(
+                f"OFTv2 target module '{module_name}' has in_features={in_features}, which is incompatible with "
+                f"oft_r={oft_r}. Expected in_features % oft_r == 0 so that "
+                f"oft_block_size = in_features / oft_r is an integer."
+            )
+
+
+def build_adapter_config(
+    model,
+    adapter_type: str,
+    target_modules,
+    lora_r: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    oft_block_size: int,
+    oft_r: int,
+    oft_module_dropout: float,
+    use_cayley_neumann: bool,
+    adapter_bias: str,
+):
+    adapter_type = adapter_type.lower()
+    if adapter_type not in SUPPORTED_ADAPTER_TYPES:
+        raise ValueError(
+            f"Unsupported adapter_type={adapter_type!r}. Supported values: {sorted(SUPPORTED_ADAPTER_TYPES)}."
+        )
+
+    if adapter_type == "lora":
+        logger.info(
+            "Using LoRA with r=%s, alpha=%s, dropout=%s, target_modules=%s",
+            lora_r,
+            lora_alpha,
+            lora_dropout,
+            target_modules,
+        )
+        return LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            target_modules=target_modules,
+            bias=adapter_bias,
+        )
+
+    validate_oftv2_target_modules(
+        model=model,
+        target_modules=target_modules,
+        oft_block_size=oft_block_size,
+        oft_r=oft_r,
+    )
+    logger.info(
+        "Using OFTv2 with oft_block_size=%s, oft_r=%s, module_dropout=%s, use_cayley_neumann=%s, target_modules=%s",
+        oft_block_size,
+        oft_r,
+        oft_module_dropout,
+        use_cayley_neumann,
+        target_modules,
+    )
+    return OFTConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=oft_r,
+        oft_block_size=oft_block_size,
+        module_dropout=oft_module_dropout,
+        target_modules=target_modules,
+        bias=adapter_bias,
+        use_cayley_neumann=use_cayley_neumann,
+    )
+
+
+def get_active_adapter_names(model):
+    active_adapters = getattr(model, "active_adapters", None)
+    if active_adapters is None:
+        active_adapters = getattr(model, "active_adapter", "default")
+    if isinstance(active_adapters, str):
+        return [active_adapters]
+    return list(active_adapters)
+
+
+def iter_oft_rotation_modules(model):
+    active_adapter_names = get_active_adapter_names(model)
+    for module_name, module in model.named_modules():
+        oft_modules = getattr(module, "oft_R", None)
+        if not isinstance(oft_modules, torch.nn.ModuleDict) or len(oft_modules) == 0:
+            continue
+
+        for adapter_name in active_adapter_names:
+            if adapter_name in oft_modules:
+                yield module_name, adapter_name, oft_modules[adapter_name]
+
+
+def oft_identity_regularization(model) -> torch.Tensor:
+    penalties = []
+    for module_name, adapter_name, rotation_module in iter_oft_rotation_modules(model):
+        if not hasattr(rotation_module, "get_weight"):
+            raise ValueError(
+                f"OFTv2 rotation module '{module_name}' for adapter '{adapter_name}' does not expose get_weight(), "
+                "so the explicit transform matrix R cannot be constructed."
+            )
+
+        rotation = rotation_module.get_weight()
+        if rotation.dim() != 2 or rotation.shape[0] != rotation.shape[1]:
+            raise ValueError(
+                f"OFTv2 rotation module '{module_name}' for adapter '{adapter_name}' produced an invalid R with "
+                f"shape {tuple(rotation.shape)}. Expected a square 2D matrix."
+            )
+
+        identity = torch.eye(rotation.size(0), device=rotation.device, dtype=rotation.dtype)
+        penalties.append(torch.norm(rotation - identity, p="fro").pow(2))
+
+    if not penalties:
+        raise ValueError(
+            "No OFTv2 target modules were found when computing the OFTv2 identity regularizer. "
+            "Check adapter_type, target_modules, and whether the model is wrapped with OFTv2."
+        )
+
+    return torch.stack(penalties).mean()
 
 def smart_tokenizer_and_embedding_resize(special_tokens_dict: Dict, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel):
     num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
@@ -323,10 +540,21 @@ def train(
     clip_min: float = 0.1,
     clip_max: float = 2.0,
     output_dir: str = None,
+    use_adapter: bool = False,
+    adapter_type: str = "lora",
+    target_modules=None,
+    adapter_bias: str = "none",
     use_lora: bool = False,
     lora_r: int = 8,
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
+    oft_block_size: int = 32,
+    oft_r: int = 0,
+    oft_module_dropout: float = 0.0,
+    use_cayley_neumann: bool = True,
+    use_oft_regularizer: bool = False,
+    lambda_oft: float = 0.0,
+    oft_regularizer_type: str = "identity",
     deepspeed_config: Optional[str] = None,
     precision: str = "bf16",
     gradient_checkpointing: bool = False,
@@ -352,6 +580,29 @@ def train(
     if output_dir is None:
         output_dir: str = f"./output/{mode}/{os.path.basename(model_name_or_path)}"
 
+    adapter_enabled = use_adapter or use_lora
+    normalized_target_modules = parse_target_modules(target_modules)
+    normalized_adapter_type = adapter_type.lower()
+    normalized_oft_regularizer_type = oft_regularizer_type.lower()
+
+    if use_oft_regularizer:
+        if normalized_adapter_type != "oftv2":
+            raise ValueError(
+                "use_oft_regularizer=True requires adapter_type='oftv2'. "
+                f"Received adapter_type={normalized_adapter_type!r}."
+            )
+        if not adapter_enabled:
+            raise ValueError("use_oft_regularizer=True requires OFTv2 adapter injection to be enabled.")
+        if mode != "asft":
+            raise ValueError(
+                "use_oft_regularizer=True is currently only supported for mode='asft', "
+                f"received mode={mode!r}."
+            )
+        if normalized_oft_regularizer_type != "identity":
+            raise ValueError(
+                f"Unsupported oft_regularizer_type={oft_regularizer_type!r}. Only 'identity' is supported."
+            )
+
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     gradient_accumulation_steps = max(1, global_batch_size // (per_device_train_batch_size * world_size))
 
@@ -365,6 +616,12 @@ def train(
     print(f"learning_rate: {learning_rate}")
     print(f"world_size: {world_size}")
     print(f"gradient_accumulation_steps: {gradient_accumulation_steps}")
+    print(f"adapter_enabled: {adapter_enabled}")
+    print(f"adapter_type: {normalized_adapter_type}")
+    print(f"target_modules: {normalized_target_modules}")
+    print(f"use_oft_regularizer: {use_oft_regularizer}")
+    print(f"lambda_oft: {lambda_oft}")
+    print(f"oft_regularizer_type: {normalized_oft_regularizer_type}")
     print("=============================")
 
     precision = precision.lower()
@@ -402,18 +659,22 @@ def train(
         **model_kwargs
     )
     
-    if use_lora:
-        logger.info(f"Using LoRA with r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}")
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=lora_r,
+    if adapter_enabled:
+        adapter_config = build_adapter_config(
+            model=model,
+            adapter_type=normalized_adapter_type,
+            target_modules=normalized_target_modules,
+            lora_r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=["q_proj", "v_proj"],
-            bias="none",
+            oft_block_size=oft_block_size,
+            oft_r=oft_r,
+            oft_module_dropout=oft_module_dropout,
+            use_cayley_neumann=use_cayley_neumann,
+            adapter_bias=adapter_bias,
         )
 
-        model = get_peft_model(model, lora_config)
+        model = get_peft_model(model, adapter_config)
         model.print_trainable_parameters()
 
     # In distributed mode, move model to the correct device
@@ -467,7 +728,7 @@ def train(
 
     # Load original model for KL modes
     original_model = None
-    if ("kl" in mode or mode == "asft") and not use_lora:
+    if ("kl" in mode or mode == "asft") and not adapter_enabled:
         print("Loading original model for KL divergence...")
 
         original_model_kwargs = {
@@ -506,6 +767,11 @@ def train(
             param.requires_grad = False
         original_model.eval()
 
+    allowed_training_arg_keys = set(TrainingArguments.__dataclass_fields__.keys())
+    filtered_training_kwargs = {
+        key: value for key, value in kwargs.items() if key in allowed_training_arg_keys
+    }
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         cache_dir=cache_dir,
@@ -527,16 +793,20 @@ def train(
         deepspeed=deepspeed_config,
         report_to="none",
         # logging_steps=1,
-        **kwargs
+        **filtered_training_kwargs
     )
 
     print("==== Transformers TrainingArguments ====")
     print(training_args)
     print("=============================")
 
-    if kwargs:
+    dropped_training_kwargs = {
+        key: value for key, value in kwargs.items() if key not in allowed_training_arg_keys
+    }
+
+    if dropped_training_kwargs:
         print("==== Extra kwargs passed to TrainingArguments ====")
-        print(kwargs)
+        print(dropped_training_kwargs)
         print("===============================================")
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
@@ -547,6 +817,10 @@ def train(
         clip_min=clip_min,
         clip_max=clip_max,
         original_model=original_model,
+        use_oft_regularizer=use_oft_regularizer,
+        lambda_oft=lambda_oft,
+        oft_regularizer_type=normalized_oft_regularizer_type,
+        adapter_type=normalized_adapter_type,
         model=model,
         tokenizer=tokenizer,
         args=training_args,

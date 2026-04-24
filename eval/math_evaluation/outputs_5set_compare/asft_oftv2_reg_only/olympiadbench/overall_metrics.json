@@ -1,0 +1,24 @@
+{
+    "olympiadbench": {
+        "acc": 38.4,
+        "mean_acc": 38.4,
+        "all_acc": [
+            38.4
+        ],
+        "num_samples": 675
+    },
+    "avg": {
+        "acc": 38.4,
+        "mean_acc": null,
+        "all_acc": null,
+        "num_samples": null
+    },
+    "overall": {
+        "acc": 38.4,
+        "mean_acc": 38.4,
+        "all_acc": [
+            38.4
+        ],
+        "num_samples": 675
+    }
+}

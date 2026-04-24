@@ -5,7 +5,7 @@ import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel, PeftConfig
-from train_lora import smart_tokenizer_and_embedding_resize, DEFAULT_PAD_TOKEN
+from train_v2 import smart_tokenizer_and_embedding_resize, DEFAULT_PAD_TOKEN
 
 
 def merge_lora(

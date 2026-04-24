@@ -1,0 +1,19 @@
+ M dev/train_debug.py
+ M dev/train_debug.sh
+ M merge_lora.py
+ M train_v2.py
+ M train_v2.sh
+?? EXPERIMENTS_OFTV2.md
+?? eval/medeval/base_med_eval.json
+?? eval/medeval/base_med_eval_adapter.json
+?? eval/medeval/ft_med_eval.json
+?? eval/medeval/ft_med_eval_adapter.json
+?? eval/medeval/ft_med_eval_bs4.json
+?? eval/medeval/run_med_eval.py.bak
+?? eval/medeval/run_med_eval_adapter.py
+?? repro_asft_oftv2/
+?? repro_logs/
+?? scripts/train_baseline_lora.sh
+?? scripts/train_oftv2.sh
+?? scripts/train_smoke_oftv2.sh
+?? tests/

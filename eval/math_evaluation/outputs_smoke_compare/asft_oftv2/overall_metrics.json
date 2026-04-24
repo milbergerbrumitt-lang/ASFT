@@ -1,0 +1,24 @@
+{
+    "math_oai": {
+        "acc": 70.0,
+        "mean_acc": 70.0,
+        "all_acc": [
+            70.0
+        ],
+        "num_samples": 20
+    },
+    "avg": {
+        "acc": 70.0,
+        "mean_acc": null,
+        "all_acc": null,
+        "num_samples": null
+    },
+    "overall": {
+        "acc": 70.0,
+        "mean_acc": 70.0,
+        "all_acc": [
+            70.0
+        ],
+        "num_samples": 20
+    }
+}
