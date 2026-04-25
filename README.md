@@ -1,4 +1,371 @@
-# Anchored Supervised Fine-Tuning (ASFT)
+# ASFT Reproduction Guide
+
+This repository contains a runnable ASFT training setup based on `train_v2.py` and
+`train_v2_geom_no_adapter.py`.
+
+The locally tested setting that was closest to the ASFT Table 1 standard was:
+
+- `kl_weight=0.03`
+- `learning_rate=5e-5`
+- `model_max_length=2048`
+- `global_batch_size=256`
+- `precision=bf16`
+
+The commands below assume the following local paths:
+
+- Repository: `/root/autodl-tmp/ASFT`
+- Base model: `/root/autodl-tmp/Qwen2.5-7B`
+- Training data: `/root/autodl-tmp/data/numina_cot_10k.jsonl`
+
+For a different machine, replace these paths with your local model and dataset paths.
+
+## Environment
+
+Create a fresh Python environment and install PyTorch first with the CUDA build that
+matches your machine. Example for CUDA 12.1:
+
+```bash
+conda create -n asft python=3.10 -y
+conda activate asft
+
+pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+```
+
+Install evaluation dependencies only if you need math evaluation:
+
+```bash
+cd /root/autodl-tmp/ASFT/eval/math_evaluation
+pip install -r requirements.txt
+```
+
+If an official ASFT dependency is too old for your CUDA/PyTorch stack, use the newest
+compatible version. Keep `transformers`, `accelerate`, and `peft` in compatible ranges.
+
+## Before Training
+
+```bash
+cd /root/autodl-tmp/ASFT
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+The scripts compute:
+
+```text
+gradient_accumulation_steps = global_batch_size / (per_device_train_batch_size * world_size)
+```
+
+With `global_batch_size=256` and `per_device_train_batch_size=1`:
+
+- single GPU: `gradient_accumulation_steps=256`
+- 8 GPUs: `gradient_accumulation_steps=32`
+
+## Experiment Variants
+
+| ID | Variant | Script | Key switches |
+|---|---|---|---|
+| A | ASFT (DFT + KL) | `train_v2.py` | `use_adapter=False`, `kl_weight=0.03` |
+| B | ASFT (KL + geometry regularizer) | `train_v2_geom_no_adapter.py` | `use_geometry_regularizer=True`, `disable_kl_in_geometry_asft=False` |
+| C | Geometry reg-only / no-KL | `train_v2_geom_no_adapter.py` | `use_geometry_regularizer=True`, `disable_kl_in_geometry_asft=True` |
+| D | OFTv2 reg-only / no-KL | `train_v2.py` | `use_adapter=True`, `adapter_type=oftv2`, `use_oft_regularizer=True` |
+| E | ASFT + OFTv2 (with KL) | `train_v2.py` | `use_adapter=True`, `adapter_type=oftv2`, `use_oft_regularizer=False` |
+
+## Single-GPU Commands
+
+### A. ASFT (DFT + KL)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python /root/autodl-tmp/ASFT/train_v2.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter False \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing True \
+  --output_dir /root/autodl-tmp/ASFT/output/asft_dft_kl_run1_bs1
+```
+
+### B. ASFT (KL + Geometry Regularizer)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python /root/autodl-tmp/ASFT/train_v2_geom_no_adapter.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter False \
+  --use_geometry_regularizer True \
+  --disable_kl_in_geometry_asft False \
+  --lambda_geom 1e-4 \
+  --geometry_regularizer_type orthogonality \
+  --geometry_target_modules q_proj,v_proj \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing True \
+  --output_dir /root/autodl-tmp/ASFT/output/asft_kl_geom_run1_bs1
+```
+
+### C. Geometry Reg-only / No-KL
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python /root/autodl-tmp/ASFT/train_v2_geom_no_adapter.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter False \
+  --use_geometry_regularizer True \
+  --disable_kl_in_geometry_asft True \
+  --lambda_geom 1e-4 \
+  --geometry_regularizer_type orthogonality \
+  --geometry_target_modules q_proj,v_proj \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing True \
+  --output_dir /root/autodl-tmp/ASFT/output/spatial_reg_only_run1_bs1
+```
+
+### D. OFTv2 Reg-only / No-KL
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python /root/autodl-tmp/ASFT/train_v2.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter True \
+  --adapter_type oftv2 \
+  --use_oft_regularizer True \
+  --lambda_oft 1e-4 \
+  --oft_regularizer_type identity \
+  --target_modules q_proj,v_proj \
+  --oft_block_size 32 \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing False \
+  --output_dir /root/autodl-tmp/ASFT/output/oftv2_reg_only_run1_bs1_nogc
+```
+
+### E. ASFT + OFTv2 (with KL)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python /root/autodl-tmp/ASFT/train_v2.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter True \
+  --adapter_type oftv2 \
+  --use_oft_regularizer False \
+  --target_modules q_proj,v_proj \
+  --oft_block_size 32 \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing False \
+  --output_dir /root/autodl-tmp/ASFT/output/asft_oftv2_run1_bs1_nogc
+```
+
+## 8-GPU Commands
+
+Run from the repository root:
+
+```bash
+cd /root/autodl-tmp/ASFT
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+### A. ASFT (DFT + KL)
+
+```bash
+torchrun --nproc_per_node=8 --master_port 29501 /root/autodl-tmp/ASFT/train_v2.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter False \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing True \
+  --output_dir /root/autodl-tmp/ASFT/output/asft_dft_kl_run1_bs1_8gpu
+```
+
+### B. ASFT (KL + Geometry Regularizer)
+
+```bash
+torchrun --nproc_per_node=8 --master_port 29502 /root/autodl-tmp/ASFT/train_v2_geom_no_adapter.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter False \
+  --use_geometry_regularizer True \
+  --disable_kl_in_geometry_asft False \
+  --lambda_geom 1e-4 \
+  --geometry_regularizer_type orthogonality \
+  --geometry_target_modules q_proj,v_proj \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing True \
+  --output_dir /root/autodl-tmp/ASFT/output/asft_kl_geom_run1_bs1_8gpu
+```
+
+### C. Geometry Reg-only / No-KL
+
+```bash
+torchrun --nproc_per_node=8 --master_port 29503 /root/autodl-tmp/ASFT/train_v2_geom_no_adapter.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter False \
+  --use_geometry_regularizer True \
+  --disable_kl_in_geometry_asft True \
+  --lambda_geom 1e-4 \
+  --geometry_regularizer_type orthogonality \
+  --geometry_target_modules q_proj,v_proj \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing True \
+  --output_dir /root/autodl-tmp/ASFT/output/spatial_reg_only_run1_bs1_8gpu
+```
+
+### D. OFTv2 Reg-only / No-KL
+
+```bash
+torchrun --nproc_per_node=8 --master_port 29504 /root/autodl-tmp/ASFT/train_v2.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter True \
+  --adapter_type oftv2 \
+  --use_oft_regularizer True \
+  --lambda_oft 1e-4 \
+  --oft_regularizer_type identity \
+  --target_modules q_proj,v_proj \
+  --oft_block_size 32 \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing False \
+  --output_dir /root/autodl-tmp/ASFT/output/oftv2_reg_only_run1_bs1_nogc_8gpu
+```
+
+### E. ASFT + OFTv2 (with KL)
+
+```bash
+torchrun --nproc_per_node=8 --master_port 29505 /root/autodl-tmp/ASFT/train_v2.py \
+  --model_name_or_path /root/autodl-tmp/Qwen2.5-7B \
+  --data_path /root/autodl-tmp/data/numina_cot_10k.jsonl \
+  --mode asft \
+  --use_adapter True \
+  --adapter_type oftv2 \
+  --use_oft_regularizer False \
+  --target_modules q_proj,v_proj \
+  --oft_block_size 32 \
+  --kl_weight 0.03 \
+  --num_train_epochs 1 \
+  --learning_rate 5e-5 \
+  --model_max_length 2048 \
+  --per_device_train_batch_size 1 \
+  --global_batch_size 256 \
+  --precision bf16 \
+  --gradient_checkpointing False \
+  --output_dir /root/autodl-tmp/ASFT/output/asft_oftv2_run1_bs1_nogc_8gpu
+```
+
+## Evaluation
+
+The math evaluation code is under `eval/math_evaluation`.
+
+```bash
+cd /root/autodl-tmp/ASFT/eval/math_evaluation
+pip install -r requirements.txt
+```
+
+Example evaluation command:
+
+```bash
+PROMPT_TYPE="qwen25-math-cot"
+MODEL_NAME_OR_PATH="/root/autodl-tmp/ASFT/output/asft_dft_kl_run1_bs1"
+bash sh/eval.sh "$PROMPT_TYPE" "$MODEL_NAME_OR_PATH"
+```
+
+For split inference and evaluation, use:
+
+```bash
+PROMPT_TYPE="qwen25-math-cot"
+MODEL_NAME_OR_PATH="/root/autodl-tmp/ASFT/output/asft_dft_kl_run1_bs1"
+OUTPUT_DIR="/root/autodl-tmp/ASFT/eval/math_evaluation/outputs/asft_dft_kl_run1_bs1"
+DATA_NAME="math_oai,minerva_math,olympiadbench,aime24,amc23"
+
+bash sh/inference.sh "$PROMPT_TYPE" "$MODEL_NAME_OR_PATH" "$OUTPUT_DIR" 16 1 "$DATA_NAME"
+bash sh/eval_only.sh "$PROMPT_TYPE" "$OUTPUT_DIR" "$DATA_NAME"
+```
+
+## Notes
+
+- `train_v2.py` supports ASFT, LoRA, OFTv2, and OFTv2 identity regularization.
+- `train_v2_geom_no_adapter.py` adds direct-weight geometry regularization for no-adapter runs.
+- Geometry regularization currently requires `use_adapter=False`.
+- OFTv2 regularization currently requires `use_adapter=True`, `adapter_type=oftv2`, and `mode=asft`.
+- For 7B full-parameter ASFT with KL, memory usage is high because the KL term uses a reference model.
+- `gradient_checkpointing=True` is recommended for no-adapter full-parameter KL runs.
+- `gradient_checkpointing=False` is used in the OFTv2 commands above because it was the stable tested setting.
+
+## Citation
+
+```bibtex
+@misc{zhu2025anchoredsupervisedfinetuning,
+      title={Anchored Supervised Fine-Tuning},
+      author={He Zhu and Junyou Su and Peng Lai and Ren Ma and Wenjia Zhang and Linyi Yang and Guanhua Chen},
+      year={2025},
+      eprint={2509.23753},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2509.23753},
+}
+```
+
+<!-- Legacy upstream README content hidden below.
 
 [![arXiv](https://img.shields.io/badge/arXiv-2509.23753-b31b1b.svg)](https://www.arxiv.org/abs/2509.23753)
 *A principled and efficient post-training method for large language models*
@@ -236,3 +603,4 @@ We welcome contributions! Please open issues or submit PRs for:
 * **Plug-and-play for LLaMA, Qwen, and more**
 
 ---
+-->
